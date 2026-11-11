@@ -523,6 +523,39 @@ RUN sed 's/container:\$hostname/vm:\$hostname/' /etc/wrap/starship.toml > /etc/w
  && grep -q 'vm:\$hostname' /etc/wrap/starship-vm.toml \
  && printf '%s\n' '[ -d /run/smolvm ] && export STARSHIP_CONFIG=/etc/wrap/starship-vm.toml' >> /etc/profile.d/wrap.sh
 
+# wrapvm: point every shell at the running desktop's display and session bus.
+# wrap-desktop already runs Xvfb on :1, a session D-Bus daemon and the AT-SPI
+# bus, but leaves DISPLAY, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset in
+# user shells, so agent-desktop reports accessibility "denied" until a human
+# exports them by hand (tests/container_a11y.sh does exactly that at its top).
+# This harness has no systemd user session: its runtime dir is
+# /tmp/wrap-desktop-<uid>/runtime, the session bus socket is .../runtime/bus,
+# not /run/user/<uid>. The exports go in /etc/wrap/wrap-desktop-env, sourced
+# from wrap.sh (login shells, and every zsh through /etc/zsh/zshenv), so both
+# bash and the interactive zsh — which has no ~/.zshrc/~/.zshenv — are covered.
+#  - <uid> is id -u at source time, so it stays right whatever uid the shell is.
+#  - guarded on the session bus socket existing: a harmless no-op when the
+#    desktop is not running, and it never points a shell at a bus with no apps
+#    (no dbus-run-session, which would spawn an isolated, empty bus).
+#  - DISPLAY and XDG_RUNTIME_DIR are not overwritten if already set (a caller
+#    that chose its own display/runtime keeps it); DBUS_SESSION_BUS_ADDRESS is
+#    always pinned to this harness bus so a stale value cannot shadow it.
+RUN cat > /etc/wrap/wrap-desktop-env <<'EOF'
+# The running desktop's display and session bus, for agent-desktop. Sourced by
+# /etc/profile.d/wrap.sh into login shells and every zsh (via /etc/zsh/zshenv).
+# A no-op until wrap-desktop is up: it keys off the session bus socket.
+wrap_desktop_runtime="/tmp/wrap-desktop-$(id -u)/runtime"
+if [ -S "$wrap_desktop_runtime/bus" ]; then
+  export DISPLAY="${DISPLAY:-:1}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$wrap_desktop_runtime}"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$wrap_desktop_runtime/bus"
+fi
+unset wrap_desktop_runtime
+EOF
+RUN chmod 0644 /etc/wrap/wrap-desktop-env \
+ && printf '%s\n' '[ -r /etc/wrap/wrap-desktop-env ] && . /etc/wrap/wrap-desktop-env' \
+      >> /etc/profile.d/wrap.sh
+
 # wrapvm: the desktop and browser skills, global for agents (pi, Claude Code,
 # Codex read ~/.agents/skills). Seeded into /etc/skel and both existing homes;
 # /etc/wrap/skills keeps a copy for an agent whose HOME is somewhere else.
@@ -533,6 +566,25 @@ RUN for home in /etc/skel /root /home/user; do \
     done \
  && chmod -R a+rX /etc/wrap/skills \
  && chown -R "${WRAP_UID}:${WRAP_GID}" /home/user/.agents
+
+# wrapvm: Kiro CLI, alongside pi/codex/claude as a workspace agent. Unlike those
+# three it is not a mise package, so it is installed from its official installer
+# (cli.kiro.dev -> the versioned binary on prod.download.cli.kiro.dev) rather
+# than named in the Smolfile's mise `init`. Installed as `user` so it lands in
+# /home/user/.local/bin (on the user's PATH at runtime, via the base image's
+# login profile) and leaves nothing root-owned under the user's home;
+# --no-modify-path because that bin is on PATH already, and --force so the
+# non-interactive build never stops to confirm a replacement. The build-time
+# check runs the binary by absolute path: the base profile only adds
+# ~/.local/bin to PATH once it exists, which during this step it does not yet.
+# Kiro authenticates by browser device flow (`kiro-cli login --use-device-flow`),
+# so there is no key to bake in; its auth state lives in the guest at
+# ~/.local/share/kiro-cli. Egress to cli.kiro.dev, prod.download.cli.kiro.dev
+# and its auth/model hosts must be allowed by whatever boots the image (the
+# Smolfile's network policy under smolvm; a plain `docker run` is unrestricted).
+RUN sudo -u "${WRAP_USER_NAME}" -H sh -lc \
+      'curl -fsSL https://cli.kiro.dev/install | bash -s -- --force --no-modify-path' \
+ && sudo -u "${WRAP_USER_NAME}" -H "${WRAP_USER_HOME}/.local/bin/kiro-cli" --version
 
 # XFCE look: no top bar, one centered bottom dock with three launchers
 # (Chrome / Thunar / Terminal) on a transparent panel, solid navy backdrop,

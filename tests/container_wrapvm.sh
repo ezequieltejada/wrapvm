@@ -8,6 +8,22 @@ ok() { printf 'ok - %s\n' "$*"; }
 ffmpeg -hide_banner -version >/dev/null
 ok 'ffmpeg is installed'
 
+# The running desktop's display and session bus reach every shell from the
+# profile — no per-session export by hand. This script's own login shell got
+# them (so agent-desktop can read the tree below), and a fresh zsh, which has
+# no ~/.zshrc/~/.zshenv, gets them through /etc/zsh/zshenv -> wrap.sh too.
+runtime="/tmp/wrap-desktop-$(id -u)/runtime"
+test "$DISPLAY" = :1
+test "$XDG_RUNTIME_DIR" = "$runtime"
+test "$DBUS_SESSION_BUS_ADDRESS" = "unix:path=$runtime/bus"
+zsh -c 'printf "%s\n%s\n%s\n" "$DISPLAY" "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS"' \
+  | tr '\n' ' ' | grep -qF ":1 $runtime unix:path=$runtime/bus"
+# With them set, agent-desktop reaches the session bus and reads the tree; no
+# dbus-run-session spun up an isolated one (the address is the harness bus).
+# Without a reachable bus the call fails; here it returns and parses as JSON.
+agent-desktop list-apps | jq -e . >/dev/null
+ok 'the desktop display and session bus reach bash and zsh; agent-desktop reaches the bus'
+
 test "$AGENT_BROWSER_CONFIG" = /home/user/workspace/agent-browser.json
 test "$(jq -c . "$AGENT_BROWSER_CONFIG")" = '{"headed":true,"autoConnect":true}'
 test "$(stat -c %u "$AGENT_BROWSER_CONFIG")" = "$(id -u)"
